@@ -3,6 +3,8 @@ staload UN = "prelude/SATS/unsafe.sats"
 
 #define ATS_DYNLOADFLAG 0
 
+#define PADDING 16
+
 %{^
 #include <limits.h>
 #include <string.h>
@@ -15,26 +17,11 @@ staload UN = "prelude/SATS/unsafe.sats"
 #include <openssl/x509.h>
 %}
 
-typedef SSL3_RECORD = $extype_struct "SSL3_RECORD" of {
-  type = int,          (* type of record *)
-  length = uint,       (* How many bytes available *)
-  orig_len = uint,     (* How many bytes were available before padding
-                          was removed? This is used to implement the
-                          MAC check in constant time for CBC records.
-                       *)
-  off = uint,          (* read/write offset into 'buf' *)
-  data = ptr,          (* pointer to the record data - uchar* *)
-  input = ptr,         (* where the decode bytes are - uchar* *)
-  comp = ptr,          (* only used with decompression - malloc()edi - uchar* *)
-  epoch = lint,        (* epoch number, needed by DTLS1 *)
-  seq_num = @[char][8] (* sequence number, needed by DTLS1 *)
-}
-typedef SSL3_RECORDptr = $extype "SSL3_RECORD*"
 abst@ype SSLptr = $extype "SSL*"
 
 %{
-/* Helper routines to access fields of C structures */
-SSL3_RECORD* get_rrec(SSL* s) { return &s->s3->rrec; }
+unsigned int get_record_length(SSL* s) { return s->s3->rrec.length; } 
+unsigned char* get_record_data(SSL* s) { return &s->s3->rrec.data[0]; }
 
 unsigned short c_n2s (unsigned char* p) {
   unsigned short s;
@@ -42,12 +29,9 @@ unsigned short c_n2s (unsigned char* p) {
   return s;
 }
 
-void* c_s2n (unsigned short s, unsigned char* p) {
+void c_s2n (unsigned short s, unsigned char* p) {
   s2n(s, p);
-  return p;
 }
-
-void* ptr_add (void* p, int n) { return p + n; }
 
 typedef void (*c_msg_callback)(int,int,int,const void*,size_t,SSL*,void*);
 c_msg_callback get_msg_callback(SSL* s) { return s->msg_callback; }
@@ -58,118 +42,184 @@ void call_msg_callback(c_msg_callback cb, int write_p, int version, int content_
 
 int get_version (SSL* s) { return s->version; }
 
-
 unsigned int get_tlsext_hb_seq (SSL* s) { return s->tlsext_hb_seq; }
 void increment_tlsext_hb_seq (SSL* s) { s->tlsext_hb_seq++; }
 void set_tlsext_hb_pending (SSL* s, unsigned int n) { s->tlsext_hb_pending = n; }
 %}
 
-extern fun get_rrec (s: SSLptr): [l:addr] (SSL3_RECORD @ l | ptr l) = "mac#get_rrec"
-extern fun c_n2s (c: ptr): usint = "mac#c_n2s"
-extern fun ptr_add (p: ptr, n: int): ptr = "mac#ptr_add"
+extern fun get_record_length (s: SSLptr): [n:nat] size_t n = "mac#get_record_length"
+extern fun get_record_data (s: SSLptr): {l:addr} ptr l = "mac#get_record_data"
 
-fun n2s (c: ptr): (ptr, int) = let
+(* A view for an array  that contains:
+     byte    = hbtype
+     ushort  = payload length
+     byte[n] = bytes of length 'payload length'
+     byte[16]= padding
+*)
+dataview record_data_v (addr, int) =
+  | {l:addr} {n:nat | n > 16 + 2 + 1} make_record_data_v (l, n) of (ptr l, size_t n)
+
+extern prfun free_record_data_v {l:addr} {n:nat} (pf: record_data_v (l, n)): void
+
+fun get_record (s: SSLptr): [l:addr] [n:nat] (record_data_v (l, n) | ptr l, size_t n) = let
+  val len = get_record_length (s)
+  val data = get_record_data (s)
+  val () = assertloc (len > 16 + 2 + 1)
+in
+  (make_record_data_v (data, len) | data, len)
+end
+
+(* These proof functions extract proofs out of the record_data_v
+   to allow access to the data stored in the record. The constants
+   for the size of the padding, payload buffer, etc are checked
+   within the proofs so that functions that manipulate memory
+   are checked that they remain within the correct bounds and
+   use the appropriate pointer values
+*)
+extern prfun extract_data_proof {l:addr} {n:nat}
+               (pf: record_data_v (l, n)):
+               (array_v (byte, l, n),
+                array_v (byte, l, n) -<lin,prf> record_data_v (l,n))
+extern prfun extract_hbtype_proof {l:addr} {n:nat}
+               (pf: record_data_v (l, n)):
+               (byte @ l, byte @ l -<lin,prf> record_data_v (l,n))
+extern prfun extract_payload_length_proof {l:addr} {n:nat}
+               (pf: record_data_v (l, n)):
+               (array_v (byte, l+1, 2),
+                array_v (byte, l+1, 2) -<lin,prf> record_data_v (l,n))
+extern prfun extract_payload_data_proof {l:addr} {n:nat}
+               (pf: record_data_v (l, n)):
+               (array_v (byte, l+1+2, n-16-2-1),
+                array_v (byte, l+1+2, n-16-2-1) -<lin,prf> record_data_v (l,n))
+extern prfun extract_padding_proof {l:addr} {n:nat} {n2:nat | n2 <= n - 16 - 2 - 1}
+               (pf: record_data_v (l, n), payload_length: size_t n2):
+               (array_v (byte, l + n2 + 1 + 2, 16),
+                array_v (byte, l + n2 + 1 + 2, 16) -<lin, prf> record_data_v (l, n))
+
+
+extern castfn cast2byte {a:t0p} (x: INV(a)):<> byte
+extern castfn usint_to_size1 (n: usint): [n:nat] size_t n
+
+extern fun c_n2s (c: ptr): usint = "mac#c_n2s"
+
+fun n2s {l:addr} (c: ptr l): [n:nat] size_t n = let
   val s = c_n2s(c)
 in
-  (ptr0_succ<usint> (c), $UN.cast2int(s))
+  usint_to_size1 (s)
 end
 
 typedef msg_callback = (int, int, int, ptr, size_t, SSLptr, ptr) -<fun> void
 extern fun get_msg_callback (s: SSLptr): ptr = "mac#get_msg_callback"
 extern fun get_msg_callback_arg (s: SSLptr): ptr = "mac#get_msg_callback_arg"
-extern fun call_msg_callback (cb: ptr, write_p: int, version: int, content_type: int, buf: ptr, len: uint, ssl: SSLptr, arg: ptr): void = "mac#call_msg_callback"
+extern fun call_msg_callback (cb: ptr, write_p: int, version: int, content_type: int, buf: ptr, len: size_t, ssl: SSLptr, arg: ptr): void = "mac#call_msg_callback"
 extern fun get_version (s: SSLptr): int = "mac#get_version"
 
 macdef TLS1_RT_HEARTBEAT = $extval(int, "TLS1_RT_HEARTBEAT")
-macdef TLS1_HB_REQUEST = $extval(uchar, "TLS1_HB_REQUEST")
-macdef TLS1_HB_RESPONSE = $extval(uchar, "TLS1_HB_RESPONSE")
+macdef TLS1_HB_REQUEST = $extval(int, "TLS1_HB_REQUEST")
+macdef TLS1_HB_RESPONSE = $extval(int, "TLS1_HB_RESPONSE")
 
-extern fun OPENSSL_malloc {n:nat} (n: int n): [l:addr] (b0ytes(n) @ l | ptr l) = "mac#OPENSSL_malloc"
-extern fun OPENSSL_free {l:addr} {n:nat} (pf: b0ytes(n) @ l | p: ptr l): void = "mac#OPENSSL_free"
-extern fun unsafe_memcpy (d: ptr, s: ptr, n: int): void = "mac#memcpy"
+extern fun OPENSSL_malloc {n:nat} (n: size_t n): [l:addr] (array_v (byte?, l, n) | ptr l) = "mac#OPENSSL_malloc"
+extern fun OPENSSL_free {l:addr} {n:nat} (pf: array_v (byte?, l, n) | p: ptr l): void = "mac#OPENSSL_free"
 extern fun safe_memcpy {l,l2:addr} {n1,n2:int} {n:int | n <= n1; n <= n2} 
-            (pf_dst: !b0ytes(n1) @ l >> bytes(n1) @ l, pf_src: !bytes(n2) @ l2 |
-             dst: ptr l, src: ptr l2, n: int n): void = "mac#memcpy"
-extern fun RAND_pseudo_bytes (p: ptr, n: int): void = "mac#RAND_pseudo_bytes"
-extern fun dtls1_write_bytes (s: SSLptr, type: int, buf: ptr, len: int): int = "mac#dtls1_write_bytes"
+            (pf_dst: !array_v (byte?, l, n1) >> array_v (byte, l, n1), pf_src: !array_v(byte, l2, n2) |
+             dst: ptr l, src: ptr l2, n: size_t n): void = "mac#memcpy"
+extern fun RAND_pseudo_bytes {l:addr} {n:nat} (pf: !array_v (byte, l, n) | p: ptr l, n: size_t n): void = "mac#RAND_pseudo_bytes"
+extern fun dtls1_write_bytes {l:addr} {n:nat} (pf: !array_v (byte, l, n) | s: SSLptr, type: int, buf: ptr l, len: size_t n): int = "mac#dtls1_write_bytes"
 extern fun dtls1_stop_timer (s: SSLptr): void = "mac#dtls1_stop_timer"
 extern fun get_tlsext_hb_seq (s: SSLptr): usint = "mac#get_tlsext_hb_seq"
 extern fun increment_tlsext_hb_seq (s: SSLptr): void = "mac#increment_tlsext_hb_seq"
 extern fun set_tlsext_hb_pending (s: SSLptr, n: uint): void = "mac#set_tlsext_hb_pending"
 
-extern castfn to_int1 (n: int): [n:int] int n
-extern castfn to_nat1 (n: uint): [n:nat] int n
-extern castfn cast2byte {a:t0p} (x: INV(a)):<> byte
 
-extern fun ptr_add_n {l:addr} {n:nat} {n2:nat | n2 >= n} (pf: !b0ytes(n2) @ l | p: ptr l, n: int n): 
-              (b0ytes(n2 -n ) @ (l+n), (b0ytes(n2-n) @ (l+n)) -<lin,prf> void | ptr (l+n)) = "mac#ptr_add"
+extern fun ptr_add_n {l:addr} {n:nat} {n2:nat | n2 >= n} (pf: !array_v (byte?, l, n2) | p: ptr l, n: int n): 
+              (array_v (byte?, l+n, n2-n), (array_v (byte?, l+n, n2-n)) -<lin,prf> void | ptr (l+n)) = "mac#ptr_add"
 
-extern fun s2n {l:addr} {n:nat | n >= 2} (pf: !b0ytes(n) @ l | s: int, c: ptr l): 
-              (b0ytes(n - 2) @ (l+2), (b0ytes(n - 2) @ (l+2)) -<lin,prf> void | ptr (l+2)) = "mac#c_s2n"
+extern fun s2n {l:addr} {n:nat | n >= 2} (pf: !array_v (byte, l, n) | s: size_t, c: ptr l):  void = "mac#c_s2n"
+
+extern fun push_ushort {l:addr} {n:nat | n >= 2} (pf: !array_v (byte?, l, n) | s: size_t, c: ptr l): 
+              (array_v (byte?, l+2, n-2), (array_v (byte?, l+2, n-2)) -<lin,prf> void | ptr (l+2)) = "mac#c_s2n"
+
 
 fun ats_dtls1_process_heartbeat(s: SSLptr): int = let
-  val padding = 16
-  val (pf_rrec | p_rrec) = get_rrec (s) 
-  val p = p_rrec->data
-  val hbtype = $UN.ptr0_get<uchar> (p)
-  val p = ptr0_succ<uchar> (p)
-  val (p, payload) = n2s (p)
-  val payload = to_int1 (payload)
-  val [rn:int] rrec_length = to_nat1(p_rrec->length)
+  val padding = i2sz(PADDING)
+  val (pf_data | p_data, data_len) = get_record (s)
 
-  val (pf_pl, pff_pl | pl)  = __hack(p) where { extern castfn __hack (p: ptr): [l:addr] [n:nat | n == rn - 1 - 2 - 16 ] (bytes(n) @ l, bytes(n) @ l -<lin,prf> void | ptr l) }
+  prval (pf, pff) = extract_hbtype_proof (pf_data)
+  val hbtype = $UN.cast2int (!p_data)
+  prval pf_data = pff (pf)
+
+  prval (pf, pff) = extract_payload_length_proof (pf_data)
+  val p = ptr_succ<byte> (p_data)
+  val payload_length = n2s (p)
+  prval pf_data = pff (pf)
 
   val () = if (ptr_isnot_null (get_msg_callback (s))) then 
              call_msg_callback (get_msg_callback (s),
                                 0, get_version (s), TLS1_RT_HEARTBEAT,
-                                p_rrec->data, p_rrec->length, s,
+                                p_data, data_len, s,
                                 get_msg_callback_arg (s))
-  prval () = _consume (pf_rrec) where { extern prfun _consume {l:addr} (s: SSL3_RECORD @ l): void }
 
 
 in
   if hbtype = TLS1_HB_REQUEST then  let
-    val n = to_int1 (1 + 2 + payload + padding)
-    val () = assertloc (n > 1 + 2 + padding)
-    val (pf_buffer | buffer) = OPENSSL_malloc(n)
+    val () = assertloc (payload_length > 0)
+    val n = payload_length + padding + 1 + 2
+    val (pf_buffer | p_buffer) = OPENSSL_malloc(n)
+    prval pf_response = make_record_data_v (p_buffer, n)
 
-    val () = !buffer.[0] := cast2byte(TLS1_HB_RESPONSE)
-    val (pf_bp, pff_bp | bp) = ptr_add_n (pf_buffer | buffer, 1)
-    val (pf_bp2, pff_bp2 | bp2) = s2n (pf_bp | payload, bp)
+    prval (pf, pff) = extract_hbtype_proof (pf_response)
+    val () = !p_buffer := cast2byte(TLS1_HB_RESPONSE)
+    prval pf_response = pff(pf)
+ 
+    prval (pf, pff) = extract_payload_length_proof (pf_response)
+    val p = add_ptr1_bsz (p_buffer, i2sz 1)
+    val () = s2n (pf | payload_length, p)
+    prval pf_response = pff(pf)
 
     (* Won't compile without these assertions *)
-    val () = assertloc (rrec_length >= 1 + 2 + payload + 16)
-    val () = assertloc (payload <= n - 3)
+    val () = assertloc (data_len >= payload_length + padding + 1 + 2)
 
-    val () = safe_memcpy (pf_bp2, pf_pl | bp2, pl, payload)
-    prval () = pff_pl (pf_pl)
-    prval () = pff_bp2(pf_bp2)
-    prval () = pff_bp(pf_bp);
+    prval (pf_dst, pff_dst) = extract_payload_data_proof (pf_response)
+    prval (pf_src, pff_src) = extract_payload_data_proof (pf_data)
+    val () = safe_memcpy (pf_dst, pf_src | add_ptr1_bsz (p_buffer, i2sz 3), add_ptr1_bsz (p_data, i2sz 3), payload_length)
+    prval pf_response = pff_dst(pf_dst)
+    prval pf_data = pff_src(pf_src)
 
-    val bp = ptr_add (bp2, payload)
-    val () = RAND_pseudo_bytes (bp, padding)
-    val r = dtls1_write_bytes (s, TLS1_RT_HEARTBEAT, buffer, 3 + $UN.cast2int(payload) + padding)
+    prval (pf, pff) = extract_padding_proof (pf_response, payload_length)
+    val () = RAND_pseudo_bytes (pf | add_ptr_bsz (p_buffer, payload_length + 1 + 2), padding)
+    prval pf_response = pff(pf)
+
+    prval (pf, pff) = extract_data_proof (pf_response)
+    val r = dtls1_write_bytes (pf | s, TLS1_RT_HEARTBEAT, p_buffer, n)
+    prval pf_response = pff(pf)
+
     val () = if r >=0 && ptr_isnot_null (get_msg_callback (s)) then 
                call_msg_callback (get_msg_callback (s),
                                   1, get_version (s), TLS1_RT_HEARTBEAT,
-                                  buffer, $UN.cast2uint (3 + $UN.cast2int(payload) + padding), s,
+                                  p_buffer, n, s,
                                   get_msg_callback_arg (s))
-    val () = OPENSSL_free (pf_buffer | buffer)
+    prval () = free_record_data_v (pf_data)
+    prval () = free_record_data_v (pf_response)
+    val () = OPENSSL_free (pf_buffer | p_buffer)
   in
     if r < 0 then r else 0    
   end else if hbtype = TLS1_HB_RESPONSE then let
-    val (pl, seq) = n2s (pl)
-    prval () = pff_pl(pf_pl)
+    prval (pf, pff) = extract_payload_data_proof (pf_data)
+    val seq = n2s (add_ptr1_bsz (p_data,  i2sz 3))
+    prval pf_data = pff (pf)
+    prval () = free_record_data_v (pf_data)
   in
-    if $UN.cast2int(payload) = 18  && $UN.cast2int(seq) = $UN.cast2int(get_tlsext_hb_seq (s)) then let
+    if $UN.cast2int(payload_length) = 18  && $UN.cast2int(seq) = $UN.cast2int(get_tlsext_hb_seq (s)) then let
       val () = dtls1_stop_timer (s)
       val () = increment_tlsext_hb_seq (s)
       val () = set_tlsext_hb_pending (s, $UN.cast2uint(0))  
     in 0
     end else 0
   end else let
-    prval () = pff_pl(pf_pl)
-  in 0 end
+    prval () = free_record_data_v (pf_data)
+  in
+   0
+  end
 end
 
 %{
