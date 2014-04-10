@@ -217,4 +217,4 @@ c_dtls1_process_heartbeat(SSL *s)
 extern fun c_dtls1_process_heartbeat (s: SSLptr): int = "mac#c_dtls1_process_heartbeat"
 extern fun dtls1_process_heartbeat (s: SSLptr): int = "ext#dtls1_process_heartbeat"
 
-implement dtls1_process_heartbeat (s) = c_dtls1_process_heartbeat (s)
+implement dtls1_process_heartbeat (s) = ats_dtls1_process_heartbeat (s)
