@@ -42,6 +42,13 @@ unsigned short c_n2s (unsigned char* p) {
   return s;
 }
 
+void* c_s2n (unsigned short s, unsigned char* p) {
+  s2n(s, p);
+  return p;
+}
+
+void* ptr_add (void* p, unsigned short n) { return p + n; }
+
 typedef void (*c_msg_callback)(int,int,int,const void*,size_t,SSL*,void*);
 c_msg_callback get_msg_callback(SSL* s) { return s->msg_callback; }
 void* get_msg_callback_arg(SSL* s) { return s->msg_callback_arg; }
@@ -54,6 +61,9 @@ int get_version (SSL* s) { return s->version; }
 
 extern fun get_rrec (s: SSLptr): [l:addr] (SSL3_RECORD @ l | ptr l) = "mac#get_rrec"
 extern fun c_n2s (c: ptr): usint = "mac#c_n2s"
+extern fun s2n (s: usint, c: ptr): ptr = "mac#c_s2n"
+extern fun ptr_add (p: ptr, n: usint): ptr = "mac#ptr_add"
+
 fun n2s (c: ptr): (ptr, usint) = let
   val s = c_n2s(c)
 in
@@ -66,9 +76,18 @@ extern fun get_msg_callback_arg (s: SSLptr): ptr = "mac#get_msg_callback_arg"
 extern fun call_msg_callback (cb: ptr, write_p: int, version: int, content_type: int, buf: ptr, len: uint, ssl: SSLptr, arg: ptr): void = "mac#call_msg_callback"
 extern fun get_version (s: SSLptr): int = "mac#get_version"
 
-macdef TLS_RT_HEARTBEAT = $extval(int, "TLS_RT_HEARTBEAT")
+macdef TLS1_RT_HEARTBEAT = $extval(int, "TLS1_RT_HEARTBEAT")
+macdef TLS1_HB_REQUEST = $extval(uchar, "TLS1_HB_REQUEST")
+macdef TLS1_HB_RESPONSE = $extval(uchar, "TLS1_HB_RESPONSE")
+
+extern fun OPENSSL_malloc (n: int): ptr = "mac#OPENSSL_malloc"
+extern fun OPENSSL_free (p: ptr): void = "mac#OPENSSL_free"
+extern fun unsafe_memcpy (d: ptr, s: ptr, n: usint): void = "mac#memcpy"
+extern fun RAND_pseudo_bytes (p: ptr, n: int): void = "mac#RAND_pseudo_bytes"
+extern fun dtls1_write_bytes (s: SSLptr, type: int, buf: ptr, len: int): int = "mac#dtls1_write_bytes"
 
 fun ats_dtls1_process_heartbeat(s: SSLptr): int = let
+  val padding = 16
   val (pf_rrec | p_rrec) = get_rrec (s) 
   val p = p_rrec->data
   val hbtype = $UN.ptr0_get<uchar> (p)
@@ -78,13 +97,34 @@ fun ats_dtls1_process_heartbeat(s: SSLptr): int = let
 
   val () = if (ptr_isnot_null (get_msg_callback (s))) then 
              call_msg_callback (get_msg_callback (s),
-                                0, get_version (s), TLS_RT_HEARTBEAT,
+                                0, get_version (s), TLS1_RT_HEARTBEAT,
                                 p_rrec->data, p_rrec->length, s,
                                 get_msg_callback_arg (s))
-
   prval () = _consume (pf_rrec) where { extern prfun _consume {l:addr} (s: SSL3_RECORD @ l): void }
 in
-  0
+  if hbtype = TLS1_HB_REQUEST then  let
+    val buffer = OPENSSL_malloc(1 + 2 + $UN.cast2int(payload) + padding)
+    val bp = buffer
+
+    val () = $UN.ptr0_set<uchar> (bp, TLS1_HB_RESPONSE)
+    val bp = ptr0_succ<uchar> (bp)
+    val bp = s2n (payload, bp)
+    val () = unsafe_memcpy (bp, pl, payload)
+    val bp = ptr_add (bp, payload)
+    val () = RAND_pseudo_bytes (bp, padding)
+    val r = dtls1_write_bytes (s, TLS1_RT_HEARTBEAT, buffer, 3 + $UN.cast2int(payload) + padding)
+    val () = if r >=0 && ptr_isnot_null (get_msg_callback (s)) then 
+               call_msg_callback (get_msg_callback (s),
+                                  1, get_version (s), TLS1_RT_HEARTBEAT,
+                                  buffer, $UN.cast2uint (3 + $UN.cast2int(payload) + padding), s,
+                                  get_msg_callback_arg (s))
+    val () = OPENSSL_free (buffer)
+  in
+    if r < 0 then r else 0    
+  end else if hbtype = TLS1_HB_RESPONSE then
+    1
+  else
+    0
 end
 
 %{
