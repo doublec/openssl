@@ -47,7 +47,7 @@ void* c_s2n (unsigned short s, unsigned char* p) {
   return p;
 }
 
-void* ptr_add (void* p, unsigned short n) { return p + n; }
+void* ptr_add (void* p, int n) { return p + n; }
 
 typedef void (*c_msg_callback)(int,int,int,const void*,size_t,SSL*,void*);
 c_msg_callback get_msg_callback(SSL* s) { return s->msg_callback; }
@@ -66,13 +66,12 @@ void set_tlsext_hb_pending (SSL* s, unsigned int n) { s->tlsext_hb_pending = n; 
 
 extern fun get_rrec (s: SSLptr): [l:addr] (SSL3_RECORD @ l | ptr l) = "mac#get_rrec"
 extern fun c_n2s (c: ptr): usint = "mac#c_n2s"
-extern fun s2n (s: usint, c: ptr): ptr = "mac#c_s2n"
-extern fun ptr_add (p: ptr, n: usint): ptr = "mac#ptr_add"
+extern fun ptr_add (p: ptr, n: int): ptr = "mac#ptr_add"
 
-fun n2s (c: ptr): (ptr, usint) = let
+fun n2s (c: ptr): (ptr, int) = let
   val s = c_n2s(c)
 in
-  (ptr0_succ<usint> (c), s)
+  (ptr0_succ<usint> (c), $UN.cast2int(s))
 end
 
 typedef msg_callback = (int, int, int, ptr, size_t, SSLptr, ptr) -<fun> void
@@ -85,15 +84,28 @@ macdef TLS1_RT_HEARTBEAT = $extval(int, "TLS1_RT_HEARTBEAT")
 macdef TLS1_HB_REQUEST = $extval(uchar, "TLS1_HB_REQUEST")
 macdef TLS1_HB_RESPONSE = $extval(uchar, "TLS1_HB_RESPONSE")
 
-extern fun OPENSSL_malloc (n: int): ptr = "mac#OPENSSL_malloc"
-extern fun OPENSSL_free (p: ptr): void = "mac#OPENSSL_free"
-extern fun unsafe_memcpy (d: ptr, s: ptr, n: usint): void = "mac#memcpy"
+extern fun OPENSSL_malloc {n:nat} (n: int n): [l:addr] (b0ytes(n) @ l | ptr l) = "mac#OPENSSL_malloc"
+extern fun OPENSSL_free {l:addr} {n:nat} (pf: b0ytes(n) @ l | p: ptr l): void = "mac#OPENSSL_free"
+extern fun unsafe_memcpy (d: ptr, s: ptr, n: int): void = "mac#memcpy"
+extern fun safe_memcpy {l,l2:addr} {n1,n2:int} {n:int | n <= n1; n <= n2} 
+            (pf_dst: !b0ytes(n1) @ l >> bytes(n1) @ l, pf_src: !bytes(n2) @ l2 |
+             dst: ptr l, src: ptr l2, n: int n): void = "mac#memcpy"
 extern fun RAND_pseudo_bytes (p: ptr, n: int): void = "mac#RAND_pseudo_bytes"
 extern fun dtls1_write_bytes (s: SSLptr, type: int, buf: ptr, len: int): int = "mac#dtls1_write_bytes"
 extern fun dtls1_stop_timer (s: SSLptr): void = "mac#dtls1_stop_timer"
 extern fun get_tlsext_hb_seq (s: SSLptr): usint = "mac#get_tlsext_hb_seq"
 extern fun increment_tlsext_hb_seq (s: SSLptr): void = "mac#increment_tlsext_hb_seq"
 extern fun set_tlsext_hb_pending (s: SSLptr, n: uint): void = "mac#set_tlsext_hb_pending"
+
+extern castfn to_int1 (n: int): [n:int] int n
+extern castfn to_nat1 (n: uint): [n:nat] int n
+extern castfn cast2byte {a:t0p} (x: INV(a)):<> byte
+
+extern fun ptr_add_n {l:addr} {n:nat} {n2:nat | n2 >= n} (pf: !b0ytes(n2) @ l | p: ptr l, n: int n): 
+              (b0ytes(n2 -n ) @ (l+n), (b0ytes(n2-n) @ (l+n)) -<lin,prf> void | ptr (l+n)) = "mac#ptr_add"
+
+extern fun s2n {l:addr} {n:nat | n >= 2} (pf: !b0ytes(n) @ l | s: int, c: ptr l): 
+              (b0ytes(n - 2) @ (l+2), (b0ytes(n - 2) @ (l+2)) -<lin,prf> void | ptr (l+2)) = "mac#c_s2n"
 
 fun ats_dtls1_process_heartbeat(s: SSLptr): int = let
   val padding = 16
@@ -102,7 +114,10 @@ fun ats_dtls1_process_heartbeat(s: SSLptr): int = let
   val hbtype = $UN.ptr0_get<uchar> (p)
   val p = ptr0_succ<uchar> (p)
   val (p, payload) = n2s (p)
-  val pl = p
+  val payload = to_int1 (payload)
+  val [rn:int] rrec_length = to_nat1(p_rrec->length)
+
+  val (pf_pl, pff_pl | pl)  = __hack(p) where { extern castfn __hack (p: ptr): [l:addr] [n:nat | n == rn - 1 - 2 - 16 ] (bytes(n) @ l, bytes(n) @ l -<lin,prf> void | ptr l) }
 
   val () = if (ptr_isnot_null (get_msg_callback (s))) then 
              call_msg_callback (get_msg_callback (s),
@@ -110,16 +125,28 @@ fun ats_dtls1_process_heartbeat(s: SSLptr): int = let
                                 p_rrec->data, p_rrec->length, s,
                                 get_msg_callback_arg (s))
   prval () = _consume (pf_rrec) where { extern prfun _consume {l:addr} (s: SSL3_RECORD @ l): void }
+
+
 in
   if hbtype = TLS1_HB_REQUEST then  let
-    val buffer = OPENSSL_malloc(1 + 2 + $UN.cast2int(payload) + padding)
-    val bp = buffer
+    val n = to_int1 (1 + 2 + payload + padding)
+    val () = assertloc (n > 1 + 2 + padding)
+    val (pf_buffer | buffer) = OPENSSL_malloc(n)
 
-    val () = $UN.ptr0_set<uchar> (bp, TLS1_HB_RESPONSE)
-    val bp = ptr0_succ<uchar> (bp)
-    val bp = s2n (payload, bp)
-    val () = unsafe_memcpy (bp, pl, payload)
-    val bp = ptr_add (bp, payload)
+    val () = !buffer.[0] := cast2byte(TLS1_HB_RESPONSE)
+    val (pf_bp, pff_bp | bp) = ptr_add_n (pf_buffer | buffer, 1)
+    val (pf_bp2, pff_bp2 | bp2) = s2n (pf_bp | payload, bp)
+
+    (* Won't compile without these assertions *)
+    val () = assertloc (rrec_length >= 1 + 2 + payload + 16)
+    val () = assertloc (payload <= n - 3)
+
+    val () = safe_memcpy (pf_bp2, pf_pl | bp2, pl, payload)
+    prval () = pff_pl (pf_pl)
+    prval () = pff_bp2(pf_bp2)
+    prval () = pff_bp(pf_bp);
+
+    val bp = ptr_add (bp2, payload)
     val () = RAND_pseudo_bytes (bp, padding)
     val r = dtls1_write_bytes (s, TLS1_RT_HEARTBEAT, buffer, 3 + $UN.cast2int(payload) + padding)
     val () = if r >=0 && ptr_isnot_null (get_msg_callback (s)) then 
@@ -127,11 +154,12 @@ in
                                   1, get_version (s), TLS1_RT_HEARTBEAT,
                                   buffer, $UN.cast2uint (3 + $UN.cast2int(payload) + padding), s,
                                   get_msg_callback_arg (s))
-    val () = OPENSSL_free (buffer)
+    val () = OPENSSL_free (pf_buffer | buffer)
   in
     if r < 0 then r else 0    
   end else if hbtype = TLS1_HB_RESPONSE then let
     val (pl, seq) = n2s (pl)
+    prval () = pff_pl(pf_pl)
   in
     if $UN.cast2int(payload) = 18  && $UN.cast2int(seq) = $UN.cast2int(get_tlsext_hb_seq (s)) then let
       val () = dtls1_stop_timer (s)
@@ -139,7 +167,9 @@ in
       val () = set_tlsext_hb_pending (s, $UN.cast2uint(0))  
     in 0
     end else 0
-  end else 0
+  end else let
+    prval () = pff_pl(pf_pl)
+  in 0 end
 end
 
 %{
