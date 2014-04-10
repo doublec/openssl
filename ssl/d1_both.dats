@@ -57,6 +57,11 @@ void call_msg_callback(c_msg_callback cb, int write_p, int version, int content_
 }
 
 int get_version (SSL* s) { return s->version; }
+
+
+unsigned int get_tlsext_hb_seq (SSL* s) { return s->tlsext_hb_seq; }
+void increment_tlsext_hb_seq (SSL* s) { s->tlsext_hb_seq++; }
+void set_tlsext_hb_pending (SSL* s, unsigned int n) { s->tlsext_hb_pending = n; }
 %}
 
 extern fun get_rrec (s: SSLptr): [l:addr] (SSL3_RECORD @ l | ptr l) = "mac#get_rrec"
@@ -85,6 +90,10 @@ extern fun OPENSSL_free (p: ptr): void = "mac#OPENSSL_free"
 extern fun unsafe_memcpy (d: ptr, s: ptr, n: usint): void = "mac#memcpy"
 extern fun RAND_pseudo_bytes (p: ptr, n: int): void = "mac#RAND_pseudo_bytes"
 extern fun dtls1_write_bytes (s: SSLptr, type: int, buf: ptr, len: int): int = "mac#dtls1_write_bytes"
+extern fun dtls1_stop_timer (s: SSLptr): void = "mac#dtls1_stop_timer"
+extern fun get_tlsext_hb_seq (s: SSLptr): usint = "mac#get_tlsext_hb_seq"
+extern fun increment_tlsext_hb_seq (s: SSLptr): void = "mac#increment_tlsext_hb_seq"
+extern fun set_tlsext_hb_pending (s: SSLptr, n: uint): void = "mac#set_tlsext_hb_pending"
 
 fun ats_dtls1_process_heartbeat(s: SSLptr): int = let
   val padding = 16
@@ -121,10 +130,16 @@ in
     val () = OPENSSL_free (buffer)
   in
     if r < 0 then r else 0    
-  end else if hbtype = TLS1_HB_RESPONSE then
-    1
-  else
-    0
+  end else if hbtype = TLS1_HB_RESPONSE then let
+    val (pl, seq) = n2s (pl)
+  in
+    if $UN.cast2int(payload) = 18  && $UN.cast2int(seq) = $UN.cast2int(get_tlsext_hb_seq (s)) then let
+      val () = dtls1_stop_timer (s)
+      val () = increment_tlsext_hb_seq (s)
+      val () = set_tlsext_hb_pending (s, $UN.cast2uint(0))  
+    in 0
+    end else 0
+  end else 0
 end
 
 %{
