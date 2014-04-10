@@ -14,7 +14,7 @@
 
 %{
 int
-dtls1_process_heartbeat(SSL *s)
+c_dtls1_process_heartbeat(SSL *s)
 	{
 	unsigned char *p = &s->s3->rrec.data[0], *pl;
 	unsigned short hbtype;
@@ -84,3 +84,9 @@ dtls1_process_heartbeat(SSL *s)
 	}
 %}
 
+abst@ype SSLptr = $extype "SSL*"
+
+extern fun c_dtls1_process_heartbeat (s: SSLptr): int = "mac#c_dtls1_process_heartbeat"
+extern fun dtls1_process_heartbeat (s: SSLptr): int = "ext#dtls1_process_heartbeat"
+
+implement dtls1_process_heartbeat (s) = c_dtls1_process_heartbeat (s)
