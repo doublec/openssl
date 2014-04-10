@@ -3,9 +3,11 @@ staload UN = "prelude/SATS/unsafe.sats"
 
 #define ATS_DYNLOADFLAG 0
 
+(* The size in bytes of the padding buffer in the request/response *)
 #define PADDING 16
 
 %{^
+/* C header files needed to use OpenSSL functions */
 #include <limits.h>
 #include <string.h>
 #include <stdio.h>
@@ -20,6 +22,10 @@ staload UN = "prelude/SATS/unsafe.sats"
 abst@ype SSLptr = $extype "SSL*"
 
 %{
+/* Some wrapper code written in C to make it easier to access
+   fields in OpenSSL structures. This could be done in ATS
+   but quicker to prototype in C.
+*/
 unsigned int get_record_length(SSL* s) { return s->s3->rrec.length; } 
 unsigned char* get_record_data(SSL* s) { return &s->s3->rrec.data[0]; }
 
@@ -36,19 +42,69 @@ void c_s2n (unsigned short s, unsigned char* p) {
 typedef void (*c_msg_callback)(int,int,int,const void*,size_t,SSL*,void*);
 c_msg_callback get_msg_callback(SSL* s) { return s->msg_callback; }
 void* get_msg_callback_arg(SSL* s) { return s->msg_callback_arg; }
-void call_msg_callback(c_msg_callback cb, int write_p, int version, int content_type, const void* buf, size_t len, SSL* ssl, void* arg) {
+void call_msg_callback(c_msg_callback cb,
+                       int write_p,
+                       int version,
+                       int content_type,
+                       const void* buf,
+                       size_t len,
+                       SSL* ssl,
+                       void* arg) {
   cb(write_p, version, content_type, buf, len, ssl, arg);
 }
 
 int get_version (SSL* s) { return s->version; }
-
 unsigned int get_tlsext_hb_seq (SSL* s) { return s->tlsext_hb_seq; }
 void increment_tlsext_hb_seq (SSL* s) { s->tlsext_hb_seq++; }
 void set_tlsext_hb_pending (SSL* s, unsigned int n) { s->tlsext_hb_pending = n; }
 %}
 
+(* ATS wrappers for the above C functions and various OpenSSL/C routines *)
 extern fun get_record_length (s: SSLptr): [n:nat] size_t n = "mac#get_record_length"
 extern fun get_record_data (s: SSLptr): {l:addr} ptr l = "mac#get_record_data"
+extern fun c_n2s (c: ptr): usint = "mac#c_n2s"
+extern fun s2n {l:addr} {n:nat | n >= 2} (pf: !array_v (byte, l, n) | s: size_t, c: ptr l):  void = "mac#c_s2n"
+
+extern fun get_msg_callback (s: SSLptr): ptr = "mac#get_msg_callback"
+extern fun get_msg_callback_arg (s: SSLptr): ptr = "mac#get_msg_callback_arg"
+extern fun call_msg_callback (cb: ptr, write_p: int, version: int,
+                              content_type: int, buf: ptr, len: size_t,
+                              ssl: SSLptr, arg: ptr): void = "mac#call_msg_callback"
+extern fun get_version (s: SSLptr): int = "mac#get_version"
+
+macdef TLS1_RT_HEARTBEAT = $extval(int, "TLS1_RT_HEARTBEAT")
+macdef TLS1_HB_REQUEST   = $extval(int, "TLS1_HB_REQUEST")
+macdef TLS1_HB_RESPONSE  = $extval(int, "TLS1_HB_RESPONSE")
+
+extern fun OPENSSL_malloc {n:nat} (n: size_t n):
+             [l:addr] (array_v (byte?, l, n) | ptr l) = "mac#OPENSSL_malloc"
+extern fun OPENSSL_free {l:addr} {n:nat} (pf: array_v (byte?, l, n) |
+                        p: ptr l):
+                        void = "mac#OPENSSL_free"
+extern fun safe_memcpy {l,l2:addr} {n1,n2:int} {n:int | n <= n1; n <= n2} 
+            (pf_dst: !array_v (byte?, l, n1) >> array_v (byte, l, n1), pf_src: !array_v(byte, l2, n2) |
+             dst: ptr l, src: ptr l2, n: size_t n):
+             void = "mac#memcpy"
+extern fun RAND_pseudo_bytes {l:addr} {n:nat}
+                             (pf: !array_v (byte, l, n) | p: ptr l, n: size_t n):
+                              void = "mac#RAND_pseudo_bytes"
+extern fun dtls1_write_bytes {l:addr} {n:nat}
+                             (pf: !array_v (byte, l, n) |
+                              s: SSLptr, type: int, buf: ptr l, len: size_t n):
+                             int = "mac#dtls1_write_bytes"
+extern fun dtls1_stop_timer (s: SSLptr): void = "mac#dtls1_stop_timer"
+extern fun get_tlsext_hb_seq (s: SSLptr): usint = "mac#get_tlsext_hb_seq"
+extern fun increment_tlsext_hb_seq (s: SSLptr): void = "mac#increment_tlsext_hb_seq"
+extern fun set_tlsext_hb_pending (s: SSLptr, n: uint): void = "mac#set_tlsext_hb_pending"
+
+extern castfn cast2byte {a:t0p} (x: INV(a)):<> byte
+extern castfn usint_to_size1 (n: usint): [n:nat] size_t n
+
+fun n2s {l:addr} (c: ptr l): [n:nat] size_t n = let
+  val s = c_n2s(c)
+in
+  usint_to_size1 (s)
+end
 
 (* A view for an array  that contains:
      byte    = hbtype
@@ -95,49 +151,6 @@ extern prfun extract_padding_proof {l:addr} {n:nat} {n2:nat | n2 <= n - 16 - 2 -
                (pf: record_data_v (l, n), payload_length: size_t n2):
                (array_v (byte, l + n2 + 1 + 2, 16),
                 array_v (byte, l + n2 + 1 + 2, 16) -<lin, prf> record_data_v (l, n))
-
-
-extern castfn cast2byte {a:t0p} (x: INV(a)):<> byte
-extern castfn usint_to_size1 (n: usint): [n:nat] size_t n
-
-extern fun c_n2s (c: ptr): usint = "mac#c_n2s"
-
-fun n2s {l:addr} (c: ptr l): [n:nat] size_t n = let
-  val s = c_n2s(c)
-in
-  usint_to_size1 (s)
-end
-
-typedef msg_callback = (int, int, int, ptr, size_t, SSLptr, ptr) -<fun> void
-extern fun get_msg_callback (s: SSLptr): ptr = "mac#get_msg_callback"
-extern fun get_msg_callback_arg (s: SSLptr): ptr = "mac#get_msg_callback_arg"
-extern fun call_msg_callback (cb: ptr, write_p: int, version: int, content_type: int, buf: ptr, len: size_t, ssl: SSLptr, arg: ptr): void = "mac#call_msg_callback"
-extern fun get_version (s: SSLptr): int = "mac#get_version"
-
-macdef TLS1_RT_HEARTBEAT = $extval(int, "TLS1_RT_HEARTBEAT")
-macdef TLS1_HB_REQUEST = $extval(int, "TLS1_HB_REQUEST")
-macdef TLS1_HB_RESPONSE = $extval(int, "TLS1_HB_RESPONSE")
-
-extern fun OPENSSL_malloc {n:nat} (n: size_t n): [l:addr] (array_v (byte?, l, n) | ptr l) = "mac#OPENSSL_malloc"
-extern fun OPENSSL_free {l:addr} {n:nat} (pf: array_v (byte?, l, n) | p: ptr l): void = "mac#OPENSSL_free"
-extern fun safe_memcpy {l,l2:addr} {n1,n2:int} {n:int | n <= n1; n <= n2} 
-            (pf_dst: !array_v (byte?, l, n1) >> array_v (byte, l, n1), pf_src: !array_v(byte, l2, n2) |
-             dst: ptr l, src: ptr l2, n: size_t n): void = "mac#memcpy"
-extern fun RAND_pseudo_bytes {l:addr} {n:nat} (pf: !array_v (byte, l, n) | p: ptr l, n: size_t n): void = "mac#RAND_pseudo_bytes"
-extern fun dtls1_write_bytes {l:addr} {n:nat} (pf: !array_v (byte, l, n) | s: SSLptr, type: int, buf: ptr l, len: size_t n): int = "mac#dtls1_write_bytes"
-extern fun dtls1_stop_timer (s: SSLptr): void = "mac#dtls1_stop_timer"
-extern fun get_tlsext_hb_seq (s: SSLptr): usint = "mac#get_tlsext_hb_seq"
-extern fun increment_tlsext_hb_seq (s: SSLptr): void = "mac#increment_tlsext_hb_seq"
-extern fun set_tlsext_hb_pending (s: SSLptr, n: uint): void = "mac#set_tlsext_hb_pending"
-
-
-extern fun ptr_add_n {l:addr} {n:nat} {n2:nat | n2 >= n} (pf: !array_v (byte?, l, n2) | p: ptr l, n: int n): 
-              (array_v (byte?, l+n, n2-n), (array_v (byte?, l+n, n2-n)) -<lin,prf> void | ptr (l+n)) = "mac#ptr_add"
-
-extern fun s2n {l:addr} {n:nat | n >= 2} (pf: !array_v (byte, l, n) | s: size_t, c: ptr l):  void = "mac#c_s2n"
-
-extern fun push_ushort {l:addr} {n:nat | n >= 2} (pf: !array_v (byte?, l, n) | s: size_t, c: ptr l): 
-              (array_v (byte?, l+2, n-2), (array_v (byte?, l+2, n-2)) -<lin,prf> void | ptr (l+2)) = "mac#c_s2n"
 
 
 fun ats_dtls1_process_heartbeat(s: SSLptr): int = let
