@@ -5,7 +5,7 @@
 DIR=	ssl
 TOP=	..
 CC=	cc
-INCLUDES= -I../crypto -I$(TOP) -I../include $(KRB5_INCLUDES)
+INCLUDES= -I../crypto -I$(TOP) -I../include $(KRB5_INCLUDES) -I$(PATSHOME) -I$(PATSHOME)/ccomp/runtime
 CFLAG=-g
 MAKEFILE=	Makefile
 AR=		ar r
@@ -26,7 +26,7 @@ LIBSRC=	\
 	s23_meth.c s23_srvr.c s23_clnt.c s23_lib.c          s23_pkt.c \
 	t1_meth.c   t1_srvr.c t1_clnt.c  t1_lib.c  t1_enc.c \
 	d1_meth.c   d1_srvr.c d1_clnt.c  d1_lib.c  d1_pkt.c \
-	d1_both.c d1_enc.c d1_srtp.c \
+	d1_both.c d1_both.dats d1_enc.c d1_srtp.c \
 	ssl_lib.c ssl_err2.c ssl_cert.c ssl_sess.c \
 	ssl_ciph.c ssl_stat.c ssl_rsa.c \
 	ssl_asn1.c ssl_txt.c ssl_algs.c ssl_conf.c \
@@ -37,7 +37,7 @@ LIBOBJ= \
 	s23_meth.o s23_srvr.o s23_clnt.o s23_lib.o          s23_pkt.o \
 	t1_meth.o   t1_srvr.o t1_clnt.o  t1_lib.o  t1_enc.o \
 	d1_meth.o   d1_srvr.o d1_clnt.o  d1_lib.o  d1_pkt.o \
-	d1_both.o d1_enc.o d1_srtp.o\
+	d1_both.o d1_both_dats.o d1_enc.o d1_srtp.o\
 	ssl_lib.o ssl_err2.o ssl_cert.o ssl_sess.o \
 	ssl_ciph.o ssl_stat.o ssl_rsa.o \
 	ssl_asn1.o ssl_txt.o ssl_algs.o ssl_conf.o \
@@ -103,6 +103,9 @@ dclean:
 clean:
 	rm -f *.o *.obj lib tags core .pure .nfs* *.old *.bak fluff
 
+d1_both_dats.c: d1_both.dats
+	patsopt --output d1_both_dats.c --dynamic d1_both.dats
+
 # DO NOT DELETE THIS LINE -- make depend depends on it.
 
 bio_ssl.o: ../include/openssl/asn1.h ../include/openssl/bio.h
@@ -143,6 +146,7 @@ d1_both.o: ../include/openssl/ssl23.h ../include/openssl/ssl3.h
 d1_both.o: ../include/openssl/stack.h ../include/openssl/symhacks.h
 d1_both.o: ../include/openssl/tls1.h ../include/openssl/x509.h
 d1_both.o: ../include/openssl/x509_vfy.h d1_both.c ssl_locl.h
+ats/d1_both_dats.c:
 d1_clnt.o: ../e_os.h ../include/openssl/asn1.h ../include/openssl/bio.h
 d1_clnt.o: ../include/openssl/bn.h ../include/openssl/buffer.h
 d1_clnt.o: ../include/openssl/comp.h ../include/openssl/crypto.h
@@ -977,8 +981,9 @@ t1_enc.o: ../include/openssl/symhacks.h ../include/openssl/tls1.h
 t1_enc.o: ../include/openssl/x509.h ../include/openssl/x509_vfy.h ssl_locl.h
 t1_enc.o: t1_enc.c
 t1_lib.o: ../e_os.h ../include/openssl/asn1.h ../include/openssl/bio.h
-t1_lib.o: ../include/openssl/buffer.h ../include/openssl/comp.h
-t1_lib.o: ../include/openssl/conf.h ../include/openssl/crypto.h
+t1_lib.o: ../include/openssl/bn.h ../include/openssl/buffer.h
+t1_lib.o: ../include/openssl/comp.h ../include/openssl/conf.h
+t1_lib.o: ../include/openssl/crypto.h ../include/openssl/dh.h
 t1_lib.o: ../include/openssl/dsa.h ../include/openssl/dtls1.h
 t1_lib.o: ../include/openssl/e_os2.h ../include/openssl/ec.h
 t1_lib.o: ../include/openssl/ecdh.h ../include/openssl/ecdsa.h

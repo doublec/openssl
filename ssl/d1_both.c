@@ -1322,6 +1322,7 @@ int dtls1_shutdown(SSL *s)
 	}
 
 #ifndef OPENSSL_NO_HEARTBEATS
+#if 0
 int
 dtls1_process_heartbeat(SSL *s)
 	{
@@ -1391,7 +1392,7 @@ dtls1_process_heartbeat(SSL *s)
 
 	return 0;
 	}
-
+#endif
 int
 dtls1_heartbeat(SSL *s)
 	{
