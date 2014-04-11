@@ -3961,6 +3961,7 @@ int SSL_get_shared_sigalgs(SSL *s, int idx,
 	
 
 #ifndef OPENSSL_NO_HEARTBEATS
+#if 0
 int
 tls1_process_heartbeat(SSL *s)
 	{
@@ -4029,7 +4030,7 @@ tls1_process_heartbeat(SSL *s)
 
 	return 0;
 	}
-
+#endif
 int
 tls1_heartbeat(SSL *s)
 	{

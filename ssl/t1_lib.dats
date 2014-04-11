@@ -9,9 +9,9 @@ staload "shared.sats"
 
 #include "shared.cats"
 
-extern fun dtls1_process_heartbeat (s: SSLptr): int = "ext#dtls1_process_heartbeat"
+extern fun tls1_process_heartbeat (s: SSLptr): int = "ext#tls1_process_heartbeat"
 
-implement dtls1_process_heartbeat(s) =
+implement tls1_process_heartbeat(s) =
 let
   fun fail {l:addr} {n:nat} (pf: record_data_v (l, n)): int =
     let
@@ -70,7 +70,7 @@ in
               prval pf_response = pff(pf)
 
               prval (pf, pff) = extract_data_proof (pf_response)
-              val r = dtls1_write_bytes (pf | s, TLS1_RT_HEARTBEAT, p_buffer, n)
+              val r = ssl3_write_bytes (pf | s, TLS1_RT_HEARTBEAT, p_buffer, n)
               prval pf_response = pff(pf)
   
               val () = if r >=0 && ptr_isnot_null (get_msg_callback (s)) then 
@@ -98,7 +98,6 @@ in
           if $UN.cast2int(payload_length) = 18 &&
              $UN.cast2int(seq) = $UN.cast2int(get_tlsext_hb_seq (s)) then
             let
-              val () = dtls1_stop_timer (s)
               val () = increment_tlsext_hb_seq (s)
               val () = set_tlsext_hb_pending (s, $UN.cast2uint(0))  
             in
