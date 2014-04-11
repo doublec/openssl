@@ -1,3 +1,5 @@
+#define ATS_STALOADFLAG 0
+
 (* ATS wrappers for C functions and various OpenSSL/C routines *)
 abst@ype SSLptr = $extype "SSL*"
 
